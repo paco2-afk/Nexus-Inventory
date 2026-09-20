@@ -2,14 +2,8 @@ import { NextResponse } from "next/server";
 import { dbConnect } from "@/lib/dbConnect";
 import { User, Role } from "@/models/index";
 
-/**
- * Create a test user for debugging PIN functionality
- * This should be removed in production
- */
 export async function POST(request) {
    try {
-      console.log("=== CREATE TEST USER API CALLED ===");
-
       await dbConnect();
 
       const body = await request.json();
@@ -25,7 +19,6 @@ export async function POST(request) {
          );
       }
 
-      // Check if user already exists
       const existingUser = await User.findOne({ email });
       if (existingUser) {
          return NextResponse.json({
@@ -40,7 +33,6 @@ export async function POST(request) {
          });
       }
 
-      // Find or create default role
       let defaultRole = await Role.findOne({ name: "user" });
       if (!defaultRole) {
          defaultRole = new Role({
@@ -50,21 +42,21 @@ export async function POST(request) {
             isSystemRole: true,
          });
          await defaultRole.save();
-         console.log("Created default role:", defaultRole);
       }
 
-      // Create test user
+      const bcrypt = (await import("bcrypt")).default;
+      const hashedPassword = await bcrypt.hash("test123", 10);
+
       const newUser = new User({
          name,
          email,
-         password: "test123", // In real app, this should be hashed
+         password: hashedPassword,
          emailVerified: true,
          status: "active",
          role: defaultRole._id,
       });
 
       const savedUser = await newUser.save();
-      console.log("Created test user:", { id: savedUser._id, email: savedUser.email });
 
       return NextResponse.json({
          ok: true,

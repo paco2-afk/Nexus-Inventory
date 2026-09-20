@@ -1,13 +1,33 @@
-// lib/dbConnect.js
 import { connectDB, disconnectDB, mongoose } from "../config/database";
 
-// Global is used here to maintain a cached connection across hot reloads
-// in development. This prevents connections growing exponentially
-// during API Route usage.
 let cached = global.mongoose;
 
 if (!cached) {
    cached = global.mongoose = { conn: null, promise: null };
+}
+
+async function ensureMemoryServer() {
+   if (process.env.MONGODB_URI && process.env.MONGODB_URI !== "memory") {
+      return;
+   }
+
+   if (global.__NEXUS_MEMORY_MONGO__) {
+      process.env.MONGODB_URI = global.__NEXUS_MEMORY_MONGO__;
+      return;
+   }
+
+   try {
+      const { MongoMemoryServer } = await import("mongodb-memory-server");
+      const mongod = await MongoMemoryServer.create();
+      const uri = mongod.getUri("nexusdb");
+      global.__NEXUS_MEMORY_MONGO__ = uri;
+      global.__NEXUS_MEMORY_MONGO_SERVER__ = mongod;
+      process.env.MONGODB_URI = uri;
+      console.log("Using in-memory MongoDB");
+   } catch (error) {
+      console.warn("mongodb-memory-server unavailable, falling back to localhost:", error.message);
+      process.env.MONGODB_URI = process.env.MONGODB_URI || "mongodb://127.0.0.1:27017/nexusdb";
+   }
 }
 
 async function dbConnect() {
@@ -16,7 +36,12 @@ async function dbConnect() {
    }
 
    if (!cached.promise) {
-      cached.promise = connectDB().catch((err) => {
+      cached.promise = (async () => {
+         if (!process.env.MONGODB_URI || process.env.MONGODB_URI === "memory") {
+            await ensureMemoryServer();
+         }
+         return connectDB();
+      })().catch((err) => {
          console.error("MongoDB connection error:", err);
          cached.promise = null;
          throw err;
@@ -33,10 +58,8 @@ async function dbConnect() {
    return cached.conn;
 }
 
-// Function to check if the connection is established
 function isConnected() {
    return mongoose.connection.readyState === 1;
 }
 
-// Export mongoose for direct use when needed
-export { dbConnect, isConnected, mongoose };
+export { dbConnect, isConnected, mongoose, disconnectDB };
