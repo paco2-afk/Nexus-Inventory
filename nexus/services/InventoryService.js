@@ -1,13 +1,22 @@
 // services/InventoryService.js
-import { StockMovement, StockLevel, Reservation, Product, Warehouse } from "../models/index.js";
+// Aligned with InventoryItem + Transaction models (no StockMovement/StockLevel/Reservation).
+import { InventoryItem, Transaction, Product, Warehouse } from "../models/index.js";
 import * as NotificationService from "./NotificationService.js";
 
 class InventoryService {
-   // Record stock movement (in/out/adjustment)
    async recordStockMovement(movementData) {
-      const { productId, warehouseId, type, quantity, reason, reference } = movementData;
+      const {
+         productId,
+         warehouseId,
+         type,
+         quantity,
+         reason,
+         reference,
+         organizationId,
+         performedBy,
+         unitCost,
+      } = movementData;
 
-      // Validate product and warehouse exist
       const product = await Product.findById(productId);
       const warehouse = await Warehouse.findById(warehouseId);
 
@@ -15,66 +24,130 @@ class InventoryService {
          throw new Error("Product or warehouse not found");
       }
 
-      // Create stock movement record
-      const movement = new StockMovement({
+      const orgId = organizationId || product.organization || warehouse.organization;
+      if (!orgId) {
+         throw new Error("Organization is required for stock movements");
+      }
+
+      let item = await InventoryItem.findOne({ product: productId, warehouse: warehouseId });
+      if (!item) {
+         if (!performedBy) {
+            throw new Error("performedBy is required when creating inventory items");
+         }
+         item = new InventoryItem({
+            product: productId,
+            warehouse: warehouseId,
+            organization: orgId,
+            quantity: { onHand: 0, reserved: 0, available: 0, damaged: 0 },
+            createdBy: performedBy,
+         });
+      }
+
+      const previousQuantity = item.quantity?.onHand ?? 0;
+      let quantityChange = Number(quantity);
+
+      // Normalize movement types to signed delta
+      if (type === "out" || type === "ship" || type === "damage" || type === "loss") {
+         quantityChange = -Math.abs(quantityChange);
+      } else if (type === "in" || type === "receive" || type === "return") {
+         quantityChange = Math.abs(quantityChange);
+      }
+      // adjustment / count / transfer: quantity may already be signed
+
+      const newQuantity = previousQuantity + quantityChange;
+      if (newQuantity < 0) {
+         throw new Error("Insufficient stock");
+      }
+
+      item.quantity.onHand = newQuantity;
+      item.lastMovement = new Date();
+      if (performedBy) item.updatedBy = performedBy;
+      await item.save();
+
+      const txTypeMap = {
+         in: "receive",
+         out: "ship",
+         adjustment: "adjust",
+         adjust: "adjust",
+         transfer: "transfer",
+         count: "count",
+         receive: "receive",
+         ship: "ship",
+         return: "return",
+         damage: "damage",
+         loss: "loss",
+         reservation: "reservation",
+         unreservation: "unreservation",
+      };
+
+      const txType = txTypeMap[type] || "adjust";
+      const ref = reference || `MOV-${Date.now()}`;
+
+      const transaction = new Transaction({
+         organization: orgId,
+         type: txType,
+         reference: ref,
+         referenceType: txType === "count" ? "count" : txType === "transfer" ? "transfer" : "adjustment",
+         referenceId: item._id,
+         inventoryItem: item._id,
          product: productId,
          warehouse: warehouseId,
-         type,
-         quantity,
+         quantityChange,
+         previousQuantity,
+         newQuantity,
+         unitCost: unitCost ?? item.cost?.unitCost,
          reason,
-         reference,
+         performedBy: performedBy || item.createdBy,
       });
 
-      await movement.save();
+      await transaction.save();
 
-      // Update stock levels
-      await this.updateStockLevel(productId, warehouseId, type, quantity);
-
-      // Check for low stock alerts
       await this.checkLowStockAlerts(productId, warehouseId);
 
-      return movement;
+      return { movement: transaction, item };
    }
 
-   // Get stock levels for a product in a warehouse
    async getStockLevels(productId, warehouseId) {
-      const stockLevel = await StockLevel.findOne({
+      const item = await InventoryItem.findOne({
          product: productId,
          warehouse: warehouseId,
       }).populate("product warehouse");
 
-      if (!stockLevel) {
+      if (!item) {
          return { productId, warehouseId, quantity: 0, reserved: 0, available: 0 };
       }
+
+      const onHand = item.quantity?.onHand ?? 0;
+      const reserved = item.quantity?.reserved ?? 0;
 
       return {
          productId,
          warehouseId,
-         quantity: stockLevel.quantity,
-         reserved: stockLevel.reserved,
-         available: stockLevel.quantity - stockLevel.reserved,
+         quantity: onHand,
+         reserved,
+         available: item.quantity?.available ?? onHand - reserved,
+         item,
       };
    }
 
-   // Perform stock take (physical inventory count)
-   async performStockTake(warehouseId, counts) {
+   async performStockTake(warehouseId, counts, { organizationId, performedBy } = {}) {
       const results = { updated: [], discrepancies: [] };
 
       for (const count of counts) {
          const { productId, countedQuantity } = count;
-
          const currentStock = await this.getStockLevels(productId, warehouseId);
-         const discrepancy = countedQuantity - currentStock.quantity;
+         const discrepancy = Number(countedQuantity) - currentStock.quantity;
 
          if (discrepancy !== 0) {
-            // Record adjustment movement
             await this.recordStockMovement({
                productId,
                warehouseId,
-               type: "adjustment",
+               type: "count",
                quantity: discrepancy,
                reason: "Stock take adjustment",
                reference: `ST-${Date.now()}`,
+               organizationId,
+               performedBy,
             });
 
             results.discrepancies.push({
@@ -91,126 +164,128 @@ class InventoryService {
       return results;
    }
 
-   // Transfer stock between warehouses
-   async transferStock(fromWarehouse, toWarehouse, productId, quantity) {
-      // Check if source warehouse has enough stock
+   async transferStock(fromWarehouse, toWarehouse, productId, quantity, opts = {}) {
       const sourceStock = await this.getStockLevels(productId, fromWarehouse);
       if (sourceStock.available < quantity) {
          throw new Error("Insufficient stock in source warehouse");
       }
 
-      // Record outbound movement
+      const ref = `TRF-${Date.now()}`;
+
       await this.recordStockMovement({
          productId,
          warehouseId: fromWarehouse,
          type: "out",
-         quantity: -quantity,
+         quantity: -Math.abs(quantity),
          reason: "Transfer to warehouse",
-         reference: `TRF-${Date.now()}`,
+         reference: ref,
+         ...opts,
       });
 
-      // Record inbound movement
       await this.recordStockMovement({
          productId,
          warehouseId: toWarehouse,
          type: "in",
-         quantity,
+         quantity: Math.abs(quantity),
          reason: "Transfer from warehouse",
-         reference: `TRF-${Date.now()}`,
+         reference: ref,
+         ...opts,
       });
 
-      return { success: true, transferred: quantity };
+      return { success: true, transferred: quantity, reference: ref };
    }
 
-   // Reserve stock for an order
-   async reserveStock(productId, quantity, warehouseId, orderId) {
-      const stockLevel = await StockLevel.findOne({
-         product: productId,
-         warehouse: warehouseId,
-      });
+   async reserveStock(productId, quantity, warehouseId, orderId, opts = {}) {
+      const item = await InventoryItem.findOne({ product: productId, warehouse: warehouseId });
+      if (!item) {
+         throw new Error("Inventory item not found");
+      }
 
-      if (!stockLevel || stockLevel.quantity - stockLevel.reserved < quantity) {
+      const available = (item.quantity?.onHand ?? 0) - (item.quantity?.reserved ?? 0);
+      if (available < quantity) {
          throw new Error("Insufficient available stock");
       }
 
-      // Create reservation
-      const reservation = new Reservation({
+      item.quantity.reserved = (item.quantity.reserved || 0) + quantity;
+      await item.save();
+
+      if (opts.performedBy && opts.organizationId) {
+         await new Transaction({
+            organization: opts.organizationId,
+            type: "reservation",
+            reference: `RSV-${orderId || Date.now()}`,
+            referenceType: "order",
+            referenceId: orderId || item._id,
+            inventoryItem: item._id,
+            product: productId,
+            warehouse: warehouseId,
+            quantityChange: 0,
+            previousQuantity: item.quantity.onHand,
+            newQuantity: item.quantity.onHand,
+            reason: `Reserved ${quantity} for order`,
+            performedBy: opts.performedBy,
+            metadata: { reserved: quantity, orderId },
+         }).save();
+      }
+
+      return {
          product: productId,
          warehouse: warehouseId,
          quantity,
          order: orderId,
-         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 hours
-      });
-
-      await reservation.save();
-
-      // Update reserved quantity
-      stockLevel.reserved += quantity;
-      await stockLevel.save();
-
-      return reservation;
+         status: "active",
+         expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000),
+         inventoryItem: item._id,
+      };
    }
 
-   // Release stock reservation
-   async releaseReservation(reservationId) {
-      const reservation = await Reservation.findById(reservationId);
-      if (!reservation) {
-         throw new Error("Reservation not found");
+   async releaseReservation(productId, warehouseId, quantity, opts = {}) {
+      const item = await InventoryItem.findOne({ product: productId, warehouse: warehouseId });
+      if (!item) {
+         throw new Error("Inventory item not found");
       }
 
-      // Update stock level
-      const stockLevel = await StockLevel.findOne({
-         product: reservation.product,
-         warehouse: reservation.warehouse,
-      });
+      item.quantity.reserved = Math.max(0, (item.quantity.reserved || 0) - quantity);
+      await item.save();
 
-      if (stockLevel) {
-         stockLevel.reserved = Math.max(0, stockLevel.reserved - reservation.quantity);
-         await stockLevel.save();
-      }
-
-      // Mark reservation as released
-      reservation.status = "released";
-      await reservation.save();
-
-      return reservation;
-   }
-
-   // Helper method to update stock levels
-   async updateStockLevel(productId, warehouseId, type, quantity) {
-      let stockLevel = await StockLevel.findOne({
-         product: productId,
-         warehouse: warehouseId,
-      });
-
-      if (!stockLevel) {
-         stockLevel = new StockLevel({
+      if (opts.performedBy && opts.organizationId) {
+         await new Transaction({
+            organization: opts.organizationId,
+            type: "unreservation",
+            reference: `URSV-${Date.now()}`,
+            referenceType: "order",
+            referenceId: opts.orderId || item._id,
+            inventoryItem: item._id,
             product: productId,
             warehouse: warehouseId,
-            quantity: 0,
-            reserved: 0,
-         });
+            quantityChange: 0,
+            previousQuantity: item.quantity.onHand,
+            newQuantity: item.quantity.onHand,
+            reason: `Released reservation of ${quantity}`,
+            performedBy: opts.performedBy,
+         }).save();
       }
 
-      // Adjust quantity based on movement type
-      if (type === "in") {
-         stockLevel.quantity += quantity;
-      } else if (type === "out" || type === "adjustment") {
-         stockLevel.quantity += quantity; // quantity can be negative for out/adjustment
-      }
-
-      await stockLevel.save();
-      return stockLevel;
+      return item;
    }
 
-   // Check for low stock alerts
    async checkLowStockAlerts(productId, warehouseId) {
       const product = await Product.findById(productId);
-      if (!product || !product.lowStockThreshold) return;
+      if (!product) return;
+
+      const threshold =
+         product.inventory?.minimumStock ??
+         product.inventory?.reorderPoint ??
+         product.lowStockThreshold;
+      if (threshold == null) return;
 
       const stockLevel = await this.getStockLevels(productId, warehouseId);
-      if (stockLevel.quantity <= product.lowStockThreshold) {
-         await NotificationService.sendLowStockAlert(productId, warehouseId, stockLevel.quantity);
+      if (stockLevel.quantity <= threshold) {
+         if (typeof NotificationService.sendLowStockAlert === "function") {
+            await NotificationService.sendLowStockAlert(productId, warehouseId, stockLevel.quantity);
+         } else if (typeof NotificationService.sendLowStockAlerts === "function") {
+            await NotificationService.sendLowStockAlerts(productId, warehouseId, stockLevel.quantity);
+         }
       }
    }
 }

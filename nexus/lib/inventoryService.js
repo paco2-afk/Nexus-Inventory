@@ -1,218 +1,155 @@
-// lib/inventoryService.js
+// lib/inventoryService.js — aligned with InventoryItem + Transaction
 import { dbConnect } from "./dbConnect";
-import { InventoryItem, Product, Warehouse } from "../models/index";
+import { InventoryItem, Product, Warehouse, Transaction } from "../models/index";
 
-/**
- * Service for inventory management operations
- */
+const onHand = (item) => item?.quantity?.onHand ?? 0;
+
 export const inventoryService = {
-   /**
-    * Get all inventory items with optional pagination and filtering
-    * @param {Object} options - Query options
-    * @param {Number} options.page - Page number (starts at 1)
-    * @param {Number} options.limit - Number of items per page
-    * @param {Object} options.filter - Filter criteria
-    * @returns {Promise<Object>} - Inventory items and pagination metadata
-    */
-   async getInventory({ page = 1, limit = 10, filter = {} } = {}) {
-      await dbConnect();
+  async getInventory({ page = 1, limit = 10, filter = {} } = {}) {
+    await dbConnect();
+    const skip = (page - 1) * limit;
+    const [total, items] = await Promise.all([
+      InventoryItem.countDocuments(filter),
+      InventoryItem.find(filter)
+        .populate("product", "name sku pricing inventory status")
+        .populate("warehouse", "name location code")
+        .sort({ updatedAt: -1 })
+        .skip(skip)
+        .limit(limit),
+    ]);
+    return { items, pagination: { total, page, limit, pages: Math.ceil(total / limit) || 0 } };
+  },
 
-      const skip = (page - 1) * limit;
-      const countPromise = InventoryItem.countDocuments(filter);
-      const itemsPromise = InventoryItem.find(filter)
-         .populate("product", "name sku price")
-         .populate("warehouse", "name location")
-         .sort({ updatedAt: -1 })
-         .skip(skip)
-         .limit(limit);
+  async getInventoryItemById(id) {
+    await dbConnect();
+    return InventoryItem.findById(id)
+      .populate("product", "name sku pricing description category inventory")
+      .populate("warehouse", "name location code capacity");
+  },
 
-      const [total, items] = await Promise.all([countPromise, itemsPromise]);
+  async createInventoryItem(itemData) {
+    await dbConnect();
+    const [product, warehouse] = await Promise.all([
+      Product.findById(itemData.product),
+      Warehouse.findById(itemData.warehouse),
+    ]);
+    if (!product || !warehouse) throw new Error("Product or warehouse not found");
+    const existing = await InventoryItem.findOne({ product: itemData.product, warehouse: itemData.warehouse });
+    if (existing) throw new Error("Inventory item already exists for this product and warehouse");
+    const qty =
+      typeof itemData.quantity === "number"
+        ? { onHand: itemData.quantity, reserved: 0, available: itemData.quantity, damaged: 0 }
+        : {
+            onHand: itemData.quantity?.onHand ?? 0,
+            reserved: itemData.quantity?.reserved ?? 0,
+            available: itemData.quantity?.available ?? itemData.quantity?.onHand ?? 0,
+            damaged: itemData.quantity?.damaged ?? 0,
+          };
+    const item = new InventoryItem({
+      ...itemData,
+      organization: itemData.organization || product.organization || warehouse.organization,
+      quantity: qty,
+    });
+    await item.save();
+    return InventoryItem.findById(item._id).populate("product", "name sku pricing").populate("warehouse", "name location");
+  },
 
-      return {
-         items,
-         pagination: {
-            total,
-            page,
-            limit,
-            pages: Math.ceil(total / limit),
-         },
-      };
-   },
+  async updateInventoryItem(id, itemData) {
+    await dbConnect();
+    if (typeof itemData.quantity === "number") {
+      itemData.quantity = { onHand: itemData.quantity, reserved: 0, available: itemData.quantity, damaged: 0 };
+    }
+    return InventoryItem.findByIdAndUpdate(id, { $set: itemData }, { new: true })
+      .populate("product", "name sku pricing")
+      .populate("warehouse", "name location");
+  },
 
-   /**
-    * Get inventory item by ID
-    * @param {String} id - Inventory item ID
-    * @returns {Promise<Object>} - Inventory item document
-    */
-   async getInventoryItemById(id) {
-      await dbConnect();
-      return InventoryItem.findById(id)
-         .populate("product", "name sku price description category")
-         .populate("warehouse", "name location capacity");
-   },
+  async deleteInventoryItem(id) {
+    await dbConnect();
+    return !!(await InventoryItem.findByIdAndDelete(id));
+  },
 
-   /**
-    * Create a new inventory item
-    * @param {Object} itemData - Inventory item data
-    * @returns {Promise<Object>} - Created inventory item
-    */
-   async createInventoryItem(itemData) {
-      await dbConnect();
-
-      // Verify product and warehouse exist
-      const [product, warehouse] = await Promise.all([
-         Product.findById(itemData.product),
-         Warehouse.findById(itemData.warehouse),
-      ]);
-
-      if (!product || !warehouse) {
-         throw new Error("Product or warehouse not found");
-      }
-
-      const item = new InventoryItem(itemData);
-      await item.save();
-
-      return InventoryItem.findById(item._id)
-         .populate("product", "name sku price")
-         .populate("warehouse", "name location");
-   },
-
-   /**
-    * Update an inventory item
-    * @param {String} id - Inventory item ID
-    * @param {Object} itemData - Updated inventory item data
-    * @returns {Promise<Object>} - Updated inventory item
-    */
-   async updateInventoryItem(id, itemData) {
-      await dbConnect();
-
-      // If changing product or warehouse, verify they exist
-      if (itemData.product || itemData.warehouse) {
-         const checks = [];
-
-         if (itemData.product) {
-            checks.push(Product.findById(itemData.product));
-         }
-
-         if (itemData.warehouse) {
-            checks.push(Warehouse.findById(itemData.warehouse));
-         }
-
-         const results = await Promise.all(checks);
-         if (results.some((result) => !result)) {
-            throw new Error("Product or warehouse not found");
-         }
-      }
-
-      const updatedItem = await InventoryItem.findByIdAndUpdate(id, { $set: itemData }, { new: true })
-         .populate("product", "name sku price")
-         .populate("warehouse", "name location");
-
-      return updatedItem;
-   },
-
-   /**
-    * Delete an inventory item
-    * @param {String} id - Inventory item ID
-    * @returns {Promise<Boolean>} - Success status
-    */
-   async deleteInventoryItem(id) {
-      await dbConnect();
-      const result = await InventoryItem.findByIdAndDelete(id);
-      return !!result;
-   },
-
-   /**
-    * Adjust inventory quantity
-    * @param {String} id - Inventory item ID
-    * @param {Number} change - Quantity change (positive for increase, negative for decrease)
-    * @param {String} reason - Reason for adjustment
-    * @returns {Promise<Object>} - Updated inventory item
-    */
-   async adjustQuantity(id, change, reason) {
-      await dbConnect();
-
-      const item = await InventoryItem.findById(id);
-      if (!item) {
-         throw new Error("Inventory item not found");
-      }
-
-      const newQuantity = item.quantity + change;
-      if (newQuantity < 0) {
-         throw new Error("Insufficient inventory");
-      }
-
-      // Record the adjustment in history
-      item.history.push({
-         date: new Date(),
-         change,
-         reason,
-         previousQuantity: item.quantity,
-         newQuantity,
+  async adjustQuantity(id, change, reason, { performedBy, organizationId } = {}) {
+    await dbConnect();
+    const item = await InventoryItem.findById(id);
+    if (!item) throw new Error("Inventory item not found");
+    const previousQuantity = onHand(item);
+    const delta = Number(change);
+    const newQuantity = previousQuantity + delta;
+    if (newQuantity < 0) throw new Error("Insufficient inventory");
+    item.quantity.onHand = newQuantity;
+    item.lastMovement = new Date();
+    if (performedBy) item.updatedBy = performedBy;
+    await item.save();
+    const org = organizationId || item.organization;
+    if (org && performedBy) {
+      await Transaction.create({
+        organization: org,
+        type: "adjust",
+        reference: `ADJ-${Date.now()}`,
+        referenceType: "adjustment",
+        referenceId: item._id,
+        inventoryItem: item._id,
+        product: item.product,
+        warehouse: item.warehouse,
+        quantityChange: delta,
+        previousQuantity,
+        newQuantity,
+        reason: reason || "Manual adjustment",
+        performedBy,
       });
+    }
+    return InventoryItem.findById(id).populate("product", "name sku pricing").populate("warehouse", "name location");
+  },
 
-      item.quantity = newQuantity;
+  async getProductInventory(productId) {
+    await dbConnect();
+    return InventoryItem.find({ product: productId })
+      .populate("warehouse", "name location")
+      .select("quantity minimumStock status lastMovement updatedAt");
+  },
+
+  async getWarehouseInventory(warehouseId, { page = 1, limit = 10 } = {}) {
+    return this.getInventory({ page, limit, filter: { warehouse: warehouseId } });
+  },
+
+  async getLowStockItems(organizationId) {
+    await dbConnect();
+    const filter = { $expr: { $lte: ["$quantity.onHand", "$minimumStock"] }, status: "active" };
+    if (organizationId) filter.organization = organizationId;
+    return InventoryItem.find(filter)
+      .populate("product", "name sku pricing")
+      .populate("warehouse", "name location")
+      .sort({ "quantity.onHand": 1 });
+  },
+
+  async performStockTake(warehouseId, counts, { organizationId, performedBy } = {}) {
+    await dbConnect();
+    const results = { updated: [], discrepancies: [] };
+    for (const count of counts) {
+      const { productId, countedQuantity, inventoryItemId } = count;
+      let item = inventoryItemId
+        ? await InventoryItem.findById(inventoryItemId)
+        : await InventoryItem.findOne({ product: productId, warehouse: warehouseId });
+      if (!item) {
+        results.discrepancies.push({ productId, error: "Inventory item not found" });
+        continue;
+      }
+      const expected = onHand(item);
+      const counted = Number(countedQuantity);
+      const discrepancy = counted - expected;
+      if (discrepancy !== 0) {
+        await this.adjustQuantity(item._id, discrepancy, "Stock take adjustment", {
+          performedBy,
+          organizationId: organizationId || item.organization,
+        });
+        results.discrepancies.push({ productId: item.product, inventoryItemId: item._id, expected, counted, discrepancy });
+      }
+      item = await InventoryItem.findById(item._id);
+      item.lastCounted = new Date();
       await item.save();
-
-      return InventoryItem.findById(id).populate("product", "name sku price").populate("warehouse", "name location");
-   },
-
-   /**
-    * Get inventory levels across all warehouses for a specific product
-    * @param {String} productId - Product ID
-    * @returns {Promise<Array>} - Inventory items for the product
-    */
-   async getProductInventory(productId) {
-      await dbConnect();
-      return InventoryItem.find({ product: productId })
-         .populate("warehouse", "name location")
-         .select("quantity minimumQuantity status lastUpdated");
-   },
-
-   /**
-    * Get all inventory items in a specific warehouse
-    * @param {String} warehouseId - Warehouse ID
-    * @param {Object} options - Query options
-    * @returns {Promise<Object>} - Inventory items and pagination metadata
-    */
-   async getWarehouseInventory(warehouseId, { page = 1, limit = 10 } = {}) {
-      await dbConnect();
-
-      const skip = (page - 1) * limit;
-      const filter = { warehouse: warehouseId };
-
-      const countPromise = InventoryItem.countDocuments(filter);
-      const itemsPromise = InventoryItem.find(filter)
-         .populate("product", "name sku price")
-         .sort({ updatedAt: -1 })
-         .skip(skip)
-         .limit(limit);
-
-      const [total, items] = await Promise.all([countPromise, itemsPromise]);
-
-      return {
-         items,
-         pagination: {
-            total,
-            page,
-            limit,
-            pages: Math.ceil(total / limit),
-         },
-      };
-   },
-
-   /**
-    * Get low stock items (below minimum quantity)
-    * @returns {Promise<Array>} - Low stock inventory items
-    */
-   async getLowStockItems() {
-      await dbConnect();
-
-      return InventoryItem.find({
-         $expr: { $lt: ["$quantity", "$minimumQuantity"] },
-      })
-         .populate("product", "name sku price")
-         .populate("warehouse", "name location")
-         .sort({ quantity: 1 });
-   },
+      results.updated.push({ productId: item.product, inventoryItemId: item._id, quantity: counted });
+    }
+    return results;
+  },
 };
