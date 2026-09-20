@@ -1,171 +1,147 @@
-// lib/serviceProvider.js
-import * as AuthService from "../services/AuthService";
-import * as ProductService from "../services/ProductService";
-import * as InventoryService from "../services/InventoryService";
-import * as OrderService from "../services/OrderService";
-import * as SupplierService from "../services/SupplierService";
-import * as UserService from "../services/UserService";
-import * as NotificationService from "../services/NotificationService";
-import * as ReportingService from "../services/ReportingService";
-import * as AnalyticsService from "../services/AnalyticsService";
-import * as BillingService from "../services/BillingService";
-import * as MediaService from "../services/MediaService";
-import * as SearchService from "../services/SearchService";
-import * as FeatureFlagService from "../services/FeatureFlagService";
-import * as CacheService from "../services/CacheService";
-import * as ImportExportService from "../services/ImportExportService";
-import * as RoleService from "../services/RoleService";
-import * as SecurityService from "../services/SecurityService";
-import * as SchedulerService from "../services/SchedulerService";
-import * as TenantService from "../services/TenantService";
-import * as PaymentService from "../services/PaymentService";
+import { productService } from "./productService";
+import { inventoryService } from "./inventoryService";
+import { orderService } from "./orderService";
+import { userService } from "./userService";
+import { notificationService } from "./notificationService";
+import { settingsService } from "./settingsService";
+import { dbConnect } from "./dbConnect";
+import { Product, Supplier, Warehouse, Order, Category } from "../models/index";
 
-// Service provider - returns appropriate service implementations
+function wrapCrud(Model) {
+   return {
+      async list() {
+         await dbConnect();
+         return Model.find().sort({ updatedAt: -1 }).lean();
+      },
+      async get(id) {
+         await dbConnect();
+         return Model.findById(id);
+      },
+      async create(data) {
+         await dbConnect();
+         const doc = new Model(data);
+         await doc.save();
+         return doc;
+      },
+      async update(id, data) {
+         await dbConnect();
+         return Model.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true });
+      },
+      async remove(id) {
+         await dbConnect();
+         const result = await Model.findByIdAndDelete(id);
+         return !!result;
+      },
+   };
+}
+
+const suppliers = wrapCrud(Supplier);
+const warehouses = wrapCrud(Warehouse);
+
 const serviceProvider = {
-   // Authentication services
    getAuthService() {
-      return AuthService;
-   },
-
-   // Product services
-   getProductService() {
-      return ProductService;
-   },
-
-   // Inventory services
-   getInventoryService() {
-      return InventoryService;
-   },
-
-   // Order services
-   getOrderService() {
-      return OrderService;
-   },
-
-   // Supplier services
-   getSupplierService() {
-      return SupplierService;
-   },
-
-   // User services
-   getUserService() {
-      return UserService;
-   },
-
-   // Notification services
-   getNotificationService() {
-      return NotificationService;
-   },
-
-   // Reporting services
-   getReportingService() {
-      return ReportingService;
-   },
-
-   // Analytics services
-   getAnalyticsService() {
-      return AnalyticsService;
-   },
-
-   // Settings services
-   getSettingsService() {
       return {
-         getSettings: async () => {
-            const { settingsService } = await import("../lib/settingsService");
-            return settingsService.getSettings();
-         },
-         updateSettings: async (data) => {
-            const { settingsService } = await import("../lib/settingsService");
-            return settingsService.updateSettings(data);
+         async authenticateUser() {
+            throw new Error("Use NextAuth credentials provider");
          },
       };
    },
-
-   // Warehouse services
+   getProductService() {
+      return {
+         ...productService,
+         listProducts: async () => {
+            const { products } = await productService.getProducts({ page: 1, limit: 100 });
+            return products;
+         },
+         updateProduct: productService.updateProduct.bind(productService),
+         createProduct: productService.createProduct.bind(productService),
+         deleteProduct: productService.deleteProduct.bind(productService),
+      };
+   },
+   getInventoryService() {
+      return inventoryService;
+   },
+   getOrderService() {
+      return {
+         ...orderService,
+         listOrders: async () => {
+            const { orders } = await orderService.getOrders({ page: 1, limit: 100 });
+            return orders;
+         },
+         createOrder: orderService.createOrder.bind(orderService),
+         updateOrder: async (id, data) => {
+            await dbConnect();
+            return Order.findByIdAndUpdate(id, { $set: data }, { new: true, runValidators: true });
+         },
+         deleteOrder: async (id) => {
+            await dbConnect();
+            const result = await Order.findByIdAndDelete(id);
+            return !!result;
+         },
+      };
+   },
+   getSupplierService() {
+      return {
+         listSuppliers: suppliers.list,
+         getSupplier: suppliers.get,
+         createSupplier: suppliers.create,
+         updateSupplier: suppliers.update,
+         deleteSupplier: suppliers.remove,
+      };
+   },
+   getUserService() {
+      return userService;
+   },
+   getNotificationService() {
+      return notificationService;
+   },
+   getReportingService() {
+      return { async generateReport() { return { status: "not_configured" }; } };
+   },
+   getAnalyticsService() {
+      return { async getMetrics() { return {}; } };
+   },
+   getSettingsService() {
+      return settingsService;
+   },
    getWarehouseService() {
       return {
-         listWarehouses: async () => {
-            const { WarehouseService } = await import("../services/WarehouseService");
-            return WarehouseService.listWarehouses();
-         },
-         getWarehouse: async (id) => {
-            const { WarehouseService } = await import("../services/WarehouseService");
-            return WarehouseService.getWarehouse(id);
-         },
-         createWarehouse: async (data) => {
-            const { WarehouseService } = await import("../services/WarehouseService");
-            return WarehouseService.createWarehouse(data);
-         },
-         updateWarehouse: async (id, data) => {
-            const { WarehouseService } = await import("../services/WarehouseService");
-            return WarehouseService.updateWarehouse(id, data);
-         },
-         deleteWarehouse: async (id) => {
-            const { WarehouseService } = await import("../services/WarehouseService");
-            return WarehouseService.deleteWarehouse(id);
-         },
+         listWarehouses: warehouses.list,
+         getWarehouse: warehouses.get,
+         createWarehouse: warehouses.create,
+         updateWarehouse: warehouses.update,
+         deleteWarehouse: warehouses.remove,
       };
    },
-
-   // Profile services
    getProfileService() {
       return {
-         getProfile: async () => {
-            const { userService } = await import("../lib/userService");
-            // TODO: Implement proper profile service
-            return {};
-         },
-         updateProfile: async (data) => {
-            const { userService } = await import("../lib/userService");
-            // TODO: Implement proper profile service
-            return data;
+         getProfile: async () => ({}),
+         updateProfile: async (data) => data,
+      };
+   },
+   getBillingService() { return {}; },
+   getMediaService() { return {}; },
+   getSearchService() {
+      return { searchProducts: productService.searchProducts?.bind(productService) };
+   },
+   getFeatureFlagService() { return { isEnabled: async () => false }; },
+   getCacheService() { return {}; },
+   getImportExportService() { return {}; },
+   getRoleService() { return {}; },
+   getSecurityService() { return {}; },
+   getSchedulerService() { return {}; },
+   getTenantService() { return {}; },
+   getPaymentService() { return {}; },
+   getCategoryService() {
+      return {
+         listCategories: async () => {
+            await dbConnect();
+            return Category.find().lean();
          },
       };
    },
-
-   // Additional services
-   getBillingService() {
-      return BillingService;
-   },
-
-   getMediaService() {
-      return MediaService;
-   },
-
-   getSearchService() {
-      return SearchService;
-   },
-
-   getFeatureFlagService() {
-      return FeatureFlagService;
-   },
-
-   getCacheService() {
-      return CacheService;
-   },
-
-   getImportExportService() {
-      return ImportExportService;
-   },
-
-   getRoleService() {
-      return RoleService;
-   },
-
-   getSecurityService() {
-      return SecurityService;
-   },
-
-   getSchedulerService() {
-      return SchedulerService;
-   },
-
-   getTenantService() {
-      return TenantService;
-   },
-
-   getPaymentService() {
-      return PaymentService;
+   getCatalog() {
+      return Product;
    },
 };
 
