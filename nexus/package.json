@@ -7,18 +7,21 @@
     "build": "next build --turbopack",
     "start": "next start",
     "lint": "eslint",
+    "seed": "node scripts/seed.mjs",
     "test:pin": "node test-pin-verification.js",
     "test:nav": "node test-navigation-behavior.js"
   },
   "dependencies": {
     "bcrypt": "^6.0.0",
     "mongodb": "^6.20.0",
+    "mongodb-memory-server": "^10.2.1",
     "mongoose": "^8.18.1",
     "next": "15.5.3",
     "next-auth": "^4.24.11",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "react-icons": "^5.5.0"
+    "react-icons": "^5.5.0",
+    "validator": "^13.15.35"
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3",

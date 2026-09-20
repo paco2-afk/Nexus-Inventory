@@ -4,28 +4,19 @@ import { NextResponse } from "next/server";
 export default withAuth(
    function middleware(req) {
       const { pathname } = req.nextUrl;
-      const token = req.nextauth.token;
+      const skipPin = process.env.SKIP_PIN_VERIFICATION === "true";
 
-      // Define protected inventory routes
       const protectedRoutes = ["/dashboard", "/inventory", "/products", "/orders", "/warehouse", "/reports"];
-
-      // Check if the current path is a protected route
       const isProtectedRoute = protectedRoutes.some((route) => pathname.startsWith(route));
 
-      if (isProtectedRoute && token) {
-         // Check if PIN has been verified
-         // In production, this should be checked server-side with secure cookies
-         // For now, we'll check a cookie that should be set by the PIN verification
+      if (isProtectedRoute && !skipPin) {
          const pinVerified = req.cookies.get("pinVerified")?.value;
 
          if (!pinVerified || pinVerified !== "true") {
-            // If PIN is not verified, check if user needs to set up PIN first
-            // For now, we'll allow access to setup-pin route
             if (pathname.startsWith("/setup-pin")) {
                return NextResponse.next();
             }
 
-            // Redirect to PIN verification
             const verifyPinUrl = new URL("/verify-pin", req.url);
             verifyPinUrl.searchParams.set("callbackUrl", pathname);
             return NextResponse.redirect(verifyPinUrl);

@@ -1,5 +1,6 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+   serverExternalPackages: ["mongoose", "bcrypt", "mongodb", "mongodb-memory-server"],
    images: {
       remotePatterns: [
          {
