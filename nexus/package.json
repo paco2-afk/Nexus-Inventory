@@ -8,6 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "seed": "node scripts/seed.mjs",
+    "nexus": "node scripts/nexus.mjs",
+    "cleanse": "node scripts/nexus.mjs cleanse",
+    "cleanse:apply": "node scripts/nexus.mjs cleanse --apply",
     "test:pin": "node test-pin-verification.js",
     "test:nav": "node test-navigation-behavior.js"
   },
